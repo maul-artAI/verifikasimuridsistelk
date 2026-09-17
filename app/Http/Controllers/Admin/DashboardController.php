@@ -103,6 +103,7 @@ class DashboardController extends Controller
         if ($revision->status_review !== 'pending') {
             return back()->withErrors(['revision' => 'Sudah direview.']);
         }
+        $paths = [$revision->file_kk, $revision->file_ijazah_smp, $revision->file_akta];
         DB::transaction(function () use ($revision) {
             $student = $revision->student;
             $old = $student->toArray();
@@ -122,6 +123,10 @@ class DashboardController extends Controller
                 'status_review' => 'disetujui',
                 'reviewed_by' => auth()->id(),
                 'reviewed_at' => now(),
+                // hapus referensi file dari DB agar tidak bisa diakses lagi
+                'file_kk' => null,
+                'file_ijazah_smp' => null,
+                'file_akta' => null,
             ]);
 
             \App\Models\AuditLog::create([
@@ -132,8 +137,10 @@ class DashboardController extends Controller
                 'performed_by' => 'admin:' . auth()->id(),
             ]);
         });
+        // hapus fisik di luar transaksi (tidak bisa rollback, jadi setelah commit)
+        $this->deleteRevisionFiles($paths, $revision->id, 'approve');
 
-        return redirect()->route('admin.revisions.index')->with('success', 'Revisi disetujui dan data siswa diperbarui.');
+        return redirect()->route('admin.revisions.index')->with('success', 'Revisi disetujui, data siswa diperbarui, dan dokumen pendukung otomatis dihapus.');
     }
 
     public function reject(Request $request, DataRevision $revision)
@@ -143,13 +150,19 @@ class DashboardController extends Controller
             return back()->withErrors(['revision' => 'Sudah direview.']);
         }
 
+        $paths = [$revision->file_kk, $revision->file_ijazah_smp, $revision->file_akta];
         $revision->update([
             'status_review' => 'ditolak',
             'catatan_admin' => $request->catatan_admin,
             'reviewed_by' => auth()->id(),
             'reviewed_at' => now(),
+            // hapus referensi file dari DB agar tidak bisa diakses lagi
+            'file_kk' => null,
+            'file_ijazah_smp' => null,
+            'file_akta' => null,
         ]);
         $revision->student->update(['status_verifikasi' => Student::STATUS_PERLU_ULANG]);
+        $this->deleteRevisionFiles($paths, $revision->id, 'reject');
 
         \App\Models\AuditLog::create([
             'student_id' => $revision->student_id,
@@ -263,6 +276,20 @@ class DashboardController extends Controller
             'performed_by' => 'admin:' . auth()->id(),
         ]);
         return back()->with('success', 'Data siswa berhasil diperbarui.');
+    }
+
+    private function deleteRevisionFiles(array $paths, int $revisionId, string $action): void
+    {
+        foreach (array_filter($paths) as $path) {
+            try {
+                if (Storage::disk('private')->exists($path)) {
+                    Storage::disk('private')->delete($path);
+                }
+            } catch (\Throwable $e) {
+                Log::channel('daily')->error('gagal hapus file revisi', ['revision' => $revisionId, 'path' => $path, 'error' => $e->getMessage()]);
+            }
+        }
+        Log::channel('daily')->info('file revisi dihapus otomatis', ['revision' => $revisionId, 'action' => $action, 'by' => auth()->id()]);
     }
 
     public function previewFile(Request $request, DataRevision $revision, string $field)
